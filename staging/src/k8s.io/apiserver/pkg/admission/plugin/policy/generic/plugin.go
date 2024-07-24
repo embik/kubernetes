@@ -32,6 +32,7 @@ import (
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
+	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -68,6 +69,8 @@ type Plugin[H any] struct {
 	stopCh            <-chan struct{}
 	authorizer        authorizer.Authorizer
 	enabled           bool
+
+	namespaceInformer coreinformers.NamespaceInformer
 }
 
 var (
@@ -97,7 +100,7 @@ func NewPlugin[H any](
 }
 
 func (c *Plugin[H]) SetExternalKubeInformerFactory(f informers.SharedInformerFactory) {
-	c.informerFactory = f
+	c.namespaceInformer = f.Core().V1().Namespaces()
 }
 
 func (c *Plugin[H]) SetExternalKubeClientSet(client kubernetes.Interface) {
@@ -142,8 +145,8 @@ func (c *Plugin[H]) ValidateInitialization() error {
 	if c.Handler == nil {
 		return errors.New("missing handler")
 	}
-	if c.informerFactory == nil {
-		return errors.New("missing informer factory")
+	if c.namespaceInformer == nil {
+		return errors.New("missing namespace informer")
 	}
 	if c.client == nil {
 		return errors.New("missing kubernetes client")
@@ -162,7 +165,7 @@ func (c *Plugin[H]) ValidateInitialization() error {
 	}
 
 	// Use default matcher
-	namespaceInformer := c.informerFactory.Core().V1().Namespaces()
+	namespaceInformer := c.namespaceInformer
 	c.matcher = matching.NewMatcher(namespaceInformer.Lister(), c.client)
 
 	if err := c.matcher.ValidateInitialization(); err != nil {

@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/admission/plugin/policy/internal/generic"
@@ -39,6 +38,9 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+
+	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
+	"github.com/kcp-dev/logicalcluster/v3"
 )
 
 type policySource[P runtime.Object, B runtime.Object, E Evaluator] struct {
@@ -60,7 +62,7 @@ type policySource[P runtime.Object, B runtime.Object, E Evaluator] struct {
 	policiesDirty atomic.Bool
 
 	lock             sync.Mutex
-	compiledPolicies map[types.NamespacedName]compiledPolicyEntry[E]
+	compiledPolicies map[string]compiledPolicyEntry[E]
 
 	// Temporary until we use the dynamic informer factory
 	paramsCRDControllers map[schema.GroupVersionKind]*paramInfo
@@ -111,7 +113,7 @@ func NewPolicySource[P runtime.Object, B runtime.Object, E Evaluator](
 		compiler:             compiler,
 		policyInformer:       generic.NewInformer[P](policyInformer),
 		bindingInformer:      generic.NewInformer[B](bindingInformer),
-		compiledPolicies:     map[types.NamespacedName]compiledPolicyEntry[E]{},
+		compiledPolicies:     map[string]compiledPolicyEntry[E]{},
 		newPolicyAccessor:    newPolicyAccessor,
 		newBindingAccessor:   newBindingAccessor,
 		paramsCRDControllers: map[schema.GroupVersionKind]*paramInfo{},
@@ -260,7 +262,7 @@ func (s *policySource[P, B, E]) calculatePolicyData() ([]PolicyHook[P, B, E], er
 	defer s.lock.Unlock()
 
 	// Create a local copy of all policies and bindings
-	policiesToBindings := map[types.NamespacedName][]B{}
+	policiesToBindings := map[string][]B{}
 	bindingList, err := s.bindingInformer.List(labels.Everything())
 	if err != nil {
 		// This should never happen unless types are misconfigured
@@ -271,7 +273,8 @@ func (s *policySource[P, B, E]) calculatePolicyData() ([]PolicyHook[P, B, E], er
 	// Gather a list of all active policy bindings
 	for _, bindingSpec := range bindingList {
 		bindingAccessor := s.newBindingAccessor(bindingSpec)
-		policyKey := bindingAccessor.GetPolicyName()
+		policyName := bindingAccessor.GetPolicyName()
+		policyKey := kcpcache.ToClusterAwareKey(bindingAccessor.GetCluster(), policyName.Namespace, policyName.Name)
 
 		// Add this binding to the list of bindings for this policy
 		policiesToBindings[policyKey] = append(policiesToBindings[policyKey], bindingSpec)
@@ -281,11 +284,17 @@ func (s *policySource[P, B, E]) calculatePolicyData() ([]PolicyHook[P, B, E], er
 	usedParams := map[schema.GroupVersionKind]struct{}{}
 	var errs []error
 	for policyKey, bindingSpecs := range policiesToBindings {
-		var inf generic.NamespacedLister[P] = s.policyInformer
-		if len(policyKey.Namespace) > 0 {
-			inf = s.policyInformer.Namespaced(policyKey.Namespace)
+		clusterName, namespace, name, err := kcpcache.SplitMetaClusterNamespaceKey(policyKey)
+		if err != nil {
+			errs = append(errs, err)
+			continue
 		}
-		policySpec, err := inf.Get(policyKey.Name)
+
+		var inf generic.NamespacedLister[P] = s.policyInformer
+		if len(namespace) > 0 {
+			inf = s.policyInformer.Namespaced(namespace)
+		}
+		policySpec, err := inf.Get(kcpcache.ToClusterAwareKey(clusterName.String(), namespace, name))
 		if errors.IsNotFound(err) {
 			// Policy for bindings doesn't exist. This can happen if the policy
 			// was deleted before the binding, or the binding was created first.
@@ -453,10 +462,8 @@ func (s *policySource[P, B, E]) compilePolicyLocked(policySpec P) E {
 		var emptyEvaluator E
 		return emptyEvaluator
 	}
-	key := types.NamespacedName{
-		Namespace: policyMeta.GetNamespace(),
-		Name:      policyMeta.GetName(),
-	}
+
+	key := kcpcache.ToClusterAwareKey(logicalcluster.From(policyMeta).String(), policyMeta.GetNamespace(), policyMeta.GetName())
 
 	compiledPolicy, wasCompiled := s.compiledPolicies[key]
 

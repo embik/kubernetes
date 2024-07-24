@@ -87,8 +87,8 @@ func NewPlugin(_ io.Reader) *Plugin {
 					f.Admissionregistration().V1().ValidatingAdmissionPolicyBindings().Informer(),
 					NewValidatingAdmissionPolicyAccessor,
 					NewValidatingAdmissionPolicyBindingAccessor,
-					compilePolicy,
-					f,
+					CompilePolicy,
+					nil, // TODO(embik): this was done in accordance with d0a7ccbaac22d32f219b4a2c4944e72e507c3d14.
 					dynamicClient,
 					restMapper,
 				)
@@ -109,7 +109,7 @@ func (a *Plugin) InspectFeatureGates(featureGates featuregate.FeatureGate) {
 	a.Plugin.SetEnabled(featureGates.Enabled(features.ValidatingAdmissionPolicy))
 }
 
-func compilePolicy(policy *Policy) Validator {
+func CompilePolicy(policy *Policy) Validator {
 	hasParam := false
 	if policy.Spec.ParamKind != nil {
 		hasParam = true
